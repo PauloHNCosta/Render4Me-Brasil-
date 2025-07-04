@@ -1,14 +1,16 @@
 import bpy
 import os
-import sys # Importa o módulo sys para obter o caminho do executável do Blender
+import sys
+import shutil
+import subprocess # Importa o módulo subprocess para executar comandos externos
 
 # Informações do Addon
 bl_info = {
-    "name": "Render4Me ! Brasil !", # Nome atualizado do addon
-    "author": "Seu Nome", # Você pode mudar para o seu nome
-    "version": (1, 5), # Versão atualizada
-    "blender": (4, 0, 0), # Compatível com Blender 4.0 e superior
-    "location": "3D Viewport > Sidebar (N-Panel)", # Nova localização do painel
+    "name": "Render4Me ! Brasil !",
+    "author": "Seu Nome",
+    "version": (1, 9), # Versão atualizada para incluir o botão de iniciar/sair
+    "blender": (4, 0, 0),
+    "location": "3D Viewport > Sidebar (N-Panel)",
     "description": "Gera comandos de linha para renderização de imagens/vídeos/cenas no Blender.",
     "warning": "",
     "doc_url": "",
@@ -16,7 +18,6 @@ bl_info = {
 }
 
 # --- Propriedades para Cenas Individuais ---
-# Esta classe define as propriedades para cada cena que o usuário adicionar
 class BlenderSceneProperties(bpy.types.PropertyGroup):
     name: bpy.props.StringProperty(
         name="Nome da Cena (no .blend)",
@@ -36,8 +37,27 @@ class BlenderSceneProperties(bpy.types.PropertyGroup):
         min=1
     )
 
+# --- Propriedades para Câmeras Individuais ---
+class BlenderCameraProperties(bpy.types.PropertyGroup):
+    name: bpy.props.StringProperty(
+        name="Nome da Câmera (no .blend)",
+        description="Nome exato da câmera no arquivo Blender para renderizar",
+        default=""
+    )
+    start_frame: bpy.props.IntProperty(
+        name="Frame Inicial da Câmera",
+        description="Frame de início para a animação desta câmera",
+        default=1,
+        min=1
+    )
+    end_frame: bpy.props.IntProperty(
+        name="Frame Final da Câmera",
+        description="Frame de fim para a animação desta câmera",
+        default=250,
+        min=1
+    )
+
 # --- Operador para Adicionar Cena ---
-# Este operador cria uma nova entrada de cena na lista
 class AddBlenderScene(bpy.types.Operator):
     bl_idname = "scene.add_blender_scene"
     bl_label = "Adicionar Cena"
@@ -48,31 +68,100 @@ class AddBlenderScene(bpy.types.Operator):
         return {'FINISHED'}
 
 # --- Operador para Remover Cena ---
-# Este operador remove uma entrada de cena da lista
 class RemoveBlenderScene(bpy.types.Operator):
     bl_idname = "scene.remove_blender_scene"
     bl_label = "Remover Cena"
     bl_description = "Remover a entrada de cena selecionada"
 
-    index: bpy.props.IntProperty() # Propriedade para saber qual cena remover
+    index: bpy.props.IntProperty()
 
     def execute(self, context):
         context.scene.blender_render_props.scenes.remove(self.index)
         return {'FINISHED'}
 
+# --- Operador para Adicionar Câmera ---
+class AddBlenderCamera(bpy.types.Operator):
+    bl_idname = "camera.add_blender_camera"
+    bl_label = "Adicionar Câmera"
+    bl_description = "Adiciona uma nova entrada de câmera para renderizar"
+
+    def execute(self, context):
+        context.scene.blender_render_props.cameras.add()
+        return {'FINISHED'}
+
+# --- Operador para Remover Câmera ---
+class RemoveBlenderCamera(bpy.types.Operator):
+    bl_idname = "camera.remove_blender_camera"
+    bl_label = "Remover Câmera"
+    bl_description = "Remove a entrada de câmera selecionada"
+
+    def execute(self, context):
+        props = context.scene.blender_render_props
+        cameras = props.cameras
+        index = props.active_camera_index
+
+        if 0 <= index < len(cameras):
+            cameras.remove(index)
+            if index > 0 and index == len(cameras):
+                props.active_camera_index -= 1
+        else:
+            self.report({'WARNING'}, "Nenhuma câmera selecionada para remover.")
+        
+        return {'FINISHED'}
+
+# --- Operador para Mover Câmera para Cima/Baixo ---
+class BLENDER_RENDER_OT_cameras_move(bpy.types.Operator):
+    bl_idname = "render.cameras_move"
+    bl_label = "Mover Câmera"
+    bl_description = "Move a câmera selecionada para cima ou para baixo na lista"
+
+    direction: bpy.props.EnumProperty(items=[
+        ('UP', "Para Cima", "Mover o item selecionado para cima"),
+        ('DOWN', "Para Baixo", "Mover o item selecionado para baixo"),
+    ])
+
+    def execute(self, context):
+        props = context.scene.blender_render_props
+        cameras = props.cameras
+        index = props.active_camera_index
+
+        if len(cameras) == 0:
+            return {'CANCELLED'}
+
+        new_index = index
+        if self.direction == 'UP':
+            new_index = max(0, index - 1)
+        elif self.direction == 'DOWN':
+            new_index = min(len(cameras) - 1, index + 1)
+
+        if new_index != index:
+            cameras.move(index, new_index)
+            props.active_camera_index = new_index
+        
+        return {'FINISHED'}
+
+# --- Classe UIList para o Sistema de Câmeras (Permite Arrastar e Soltar) ---
+class BLENDER_RENDER_UL_cameras(bpy.types.UIList):
+    def draw_item(self, context, layout, data, item, icon, active_data, active_property):
+        if self.layout_type in {'DEFAULT', 'COMPACT'}:
+            row = layout.row(align=True)
+            row.prop(item, "name", text="", emboss=False, icon='CAMERA_DATA')
+            row.prop(item, "start_frame", text="Início", emboss=False)
+            row.prop(item, "end_frame", text="Fim", emboss=False)
+        elif self.layout_type in {'GRID'}:
+            layout.alignment = 'CENTER'
+            layout.label(text="", icon='CAMERA_DATA')
+
 # --- Operador para Gerar o Comando ---
-# Este é o coração do addon, onde o comando de linha é construído
 class GenerateBlenderCommand(bpy.types.Operator):
     bl_idname = "render.generate_blender_command"
     bl_label = "Gerar Comando de Render"
     bl_description = "Gera o(s) comando(s) de linha para renderização do Blender"
 
     def execute(self, context):
-        props = context.scene.blender_render_props # Acessa as propriedades do addon
+        props = context.scene.blender_render_props
 
-        # --- Preenchimento automático de caminhos se estiverem vazios ---
         if not props.blender_executable_path:
-            # Usa bpy.app.binary_path para obter o caminho do executável do Blender
             if bpy.app.binary_path:
                 props.blender_executable_path = bpy.app.binary_path
                 self.report({'INFO'}, f"Caminho do Executável do Blender preenchido automaticamente: {bpy.app.binary_path}")
@@ -87,7 +176,6 @@ class GenerateBlenderCommand(bpy.types.Operator):
             else:
                 self.report({'ERROR'}, "O arquivo .blend atual não foi salvo. Por favor, salve o arquivo ou defina o Caminho do Arquivo .blend manualmente.")
                 return {'CANCELLED'}
-        # --- Fim do preenchimento automático ---
 
         blender_path = props.blender_executable_path
         blend_file_path = props.blend_file_path
@@ -99,7 +187,6 @@ class GenerateBlenderCommand(bpy.types.Operator):
         render_engine = props.render_engine
         use_custom_render_engine = props.use_custom_render_engine
 
-        # Validação de campos obrigatórios
         if not blender_path:
             self.report({'ERROR'}, "Por favor, defina o Caminho do Executável do Blender.")
             return {'CANCELLED'}
@@ -107,28 +194,64 @@ class GenerateBlenderCommand(bpy.types.Operator):
             self.report({'ERROR'}, "Por favor, defina o Caminho do Arquivo .blend.")
             return {'CANCELLED'}
 
-        # Normaliza os caminhos para uso em linha de comando (adiciona aspas se houver espaços)
         formatted_blender_path = f'"{blender_path}"' if ' ' in blender_path else blender_path
         formatted_blend_file_path = f'"{blend_file_path}"' if ' ' in blend_file_path else blend_file_path
         
-        # O caminho de saída personalizado precisa ser tratado para ser um diretório
-        # e ter barras corretas para o sistema operacional
         formatted_custom_output_path = ""
         if custom_output_path:
-            # Garante que o caminho termina com o separador de diretório
             normalized_path = os.path.normpath(custom_output_path)
             if not normalized_path.endswith(os.sep):
                 normalized_path += os.sep
             formatted_custom_output_path = f'"{normalized_path}"' if ' ' in normalized_path else normalized_path
 
 
-        commands = [] # Lista para armazenar os comandos gerados
-
-        # Adiciona o argumento do motor de renderização se ativado
+        commands = []
         engine_arg = f"-E {render_engine}" if use_custom_render_engine else ""
 
-        if props.use_scene_system:
-            # Lógica para renderizar múltiplas cenas
+        if props.use_camera_system:
+            if not props.cameras:
+                self.report({'ERROR'}, "Por favor, adicione pelo menos uma câmera para renderizar ao usar o Sistema de Múltiplas Câmeras.")
+                return {'CANCELLED'}
+
+            for camera_prop in props.cameras:
+                if not camera_prop.name:
+                    self.report({'ERROR'}, f"O nome da câmera é obrigatório para a câmera com Frame Inicial {camera_prop.start_frame}.")
+                    commands = []
+                    return {'CANCELLED'}
+                if camera_prop.start_frame < 1:
+                    self.report({'ERROR'}, f"Frame Inicial inválido para a câmera '{camera_prop.name}'.")
+                    commands = []
+                    return {'CANCELLED'}
+                if camera_prop.end_frame < camera_prop.start_frame:
+                    self.report({'ERROR'}, f"Frame Final inválido para a câmera '{camera_prop.name}'.")
+                    commands = []
+                    return {'CANCELLED'}
+
+                command_base = f"{formatted_blender_path} -b {formatted_blend_file_path} -c {camera_prop.name}"
+                output_path_arg = ""
+                frame_args = ""
+                video_args = ""
+
+                if output_format in ["PNG", "JPEG", "EXR", "TIFF", "BMP"]:
+                    output_path_arg = f"-o {formatted_custom_output_path}render_{camera_prop.name}_####" if custom_output_path else f"-o //render_{camera_prop.name}_####"
+                    frame_args = f"-s {camera_prop.start_frame} -e {camera_prop.end_frame} -a"
+                else:
+                    if not output_file_name:
+                        self.report({'ERROR'}, "Nome do Arquivo de Saída é obrigatório para renderização de vídeo (configuração global).")
+                        commands = []
+                        return {'CANCELLED'}
+                    
+                    output_path_arg = f"-o {formatted_custom_output_path}{output_file_name}_{camera_prop.name}" if custom_output_path else f"-o //{output_file_name}_{camera_prop.name}"
+                    frame_args = f"-s {camera_prop.start_frame} -e {camera_prop.end_frame} -a"
+                    
+                    if video_codec:
+                        video_args += f" -vcodec {video_codec}"
+                    if fps:
+                        video_args += f" -fps {fps}"
+                
+                commands.append(f"{command_base} {output_path_arg} -F {output_format} {frame_args}{video_args} {engine_arg}".strip())
+
+        elif props.use_scene_system:
             if not props.scenes:
                 self.report({'ERROR'}, "Por favor, adicione pelo menos uma cena para renderizar ao usar o Sistema de Cenas.")
                 return {'CANCELLED'}
@@ -136,7 +259,7 @@ class GenerateBlenderCommand(bpy.types.Operator):
             for scene_prop in props.scenes:
                 if not scene_prop.name:
                     self.report({'ERROR'}, f"O nome da cena é obrigatório para a cena com Frame Inicial {scene_prop.start_frame}.")
-                    commands = [] # Limpa comandos se houver erro
+                    commands = []
                     return {'CANCELLED'}
                 if scene_prop.start_frame < 1:
                     self.report({'ERROR'}, f"Frame Inicial inválido para a cena '{scene_prop.name}'.")
@@ -152,20 +275,17 @@ class GenerateBlenderCommand(bpy.types.Operator):
                 frame_args = ""
                 video_args = ""
 
-                if output_format in ["PNG", "JPEG", "EXR", "TIFF", "BMP"]: # Formatos de imagem (sequência)
-                    # Para sequências de imagem em animação, Blender usa -s -e -a
-                    # O output_path_arg já inclui #### para preenchimento de frames
+                if output_format in ["PNG", "JPEG", "EXR", "TIFF", "BMP"]:
                     output_path_arg = f"-o {formatted_custom_output_path}render_{scene_prop.name}_####" if custom_output_path else f"-o //render_{scene_prop.name}_####"
-                    frame_args = f"-s {scene_prop.start_frame} -e {scene_prop.end_frame} -a" # Renderiza a animação da cena como sequência de imagens
-                else: # Formatos de vídeo
+                    frame_args = f"-s {scene_prop.start_frame} -e {scene_prop.end_frame} -a"
+                else:
                     if not output_file_name:
                         self.report({'ERROR'}, "Nome do Arquivo de Saída é obrigatório para renderização de vídeo (configuração global).")
                         commands = []
                         return {'CANCELLED'}
                     
-                    # Se houver custom_output_path, usa-o, senão usa o relativo ao .blend
                     output_path_arg = f"-o {formatted_custom_output_path}{output_file_name}_{scene_prop.name}" if custom_output_path else f"-o //{output_file_name}_{scene_prop.name}"
-                    frame_args = f"-s {scene_prop.start_frame} -e {scene_prop.end_frame} -a" # -a para animação
+                    frame_args = f"-s {scene_prop.start_frame} -e {scene_prop.end_frame} -a"
                     
                     if video_codec:
                         video_args += f" -vcodec {video_codec}"
@@ -174,21 +294,19 @@ class GenerateBlenderCommand(bpy.types.Operator):
                 
                 commands.append(f"{command_base} {output_path_arg} -F {output_format} {frame_args}{video_args} {engine_arg}".strip())
 
-        else: # Não usando o sistema de cenas (render global)
+        else:
             command_base = f"{formatted_blender_path} -b {formatted_blend_file_path}"
             output_path_arg = ""
             frame_args = ""
             video_args = ""
 
-            if output_format in ["PNG", "JPEG", "EXR", "TIFF", "BMP"]: # Formatos de imagem
-                # Se for render de imagem única, usa -f
+            if output_format in ["PNG", "JPEG", "EXR", "TIFF", "BMP"]:
                 if props.frame_number < 1:
                     self.report({'ERROR'}, "Por favor, insira um Número de Frame válido (maior ou igual a 1) para a imagem.")
                     return {'CANCELLED'}
-                # Se houver custom_output_path, usa-o, senão usa o relativo ao .blend
                 output_path_arg = f"-o {formatted_custom_output_path}render_####" if custom_output_path else f"-o //render_####"
                 frame_args = f"-f {props.frame_number}"
-            else: # Formatos de vídeo
+            else:
                 if not output_file_name:
                     self.report({'ERROR'}, "Nome do Arquivo de Saída é obrigatório para renderização de vídeo.")
                     return {'CANCELLED'}
@@ -199,9 +317,8 @@ class GenerateBlenderCommand(bpy.types.Operator):
                     self.report({'ERROR'}, "Por favor, insira um Frame Final Global válido (deve ser >= Frame Inicial).")
                     return {'CANCELLED'}
 
-                # Se houver custom_output_path, usa-o, senão usa o relativo ao .blend
                 output_path_arg = f"-o {formatted_custom_output_path}{output_file_name}" if custom_output_path else f"-o //{output_file_name}"
-                frame_args = f"-s {props.start_frame_global} -e {props.end_frame_global} -a" # -a para animação
+                frame_args = f"-s {props.start_frame_global} -e {props.end_frame_global} -a"
                 
                 if video_codec:
                     video_args += f" -vcodec {video_codec}"
@@ -210,13 +327,11 @@ class GenerateBlenderCommand(bpy.types.Operator):
             
             commands.append(f"{command_base} {output_path_arg} -F {output_format} {frame_args}{video_args} {engine_arg}".strip())
 
-        # Armazena o(s) comando(s) gerado(s) em uma propriedade para ser exibido na UI
         props.generated_command = "\n\n".join(commands)
         self.report({'INFO'}, "Comando(s) gerado(s) com sucesso!")
         return {'FINISHED'}
 
 # --- Operador para Copiar Comando para a Área de Transferência ---
-# Este operador copia o texto do comando para a área de transferência do sistema
 class CopyBlenderCommand(bpy.types.Operator):
     bl_idname = "render.copy_blender_command"
     bl_label = "Copiar Comando"
@@ -232,7 +347,6 @@ class CopyBlenderCommand(bpy.types.Operator):
         return {'FINISHED'}
 
 # --- Operador para Limpar Campos ---
-# Este operador limpa os campos de texto do addon
 class ClearBlenderFields(bpy.types.Operator):
     bl_idname = "render.clear_blender_fields"
     bl_label = "Limpar Campos"
@@ -246,9 +360,12 @@ class ClearBlenderFields(bpy.types.Operator):
         props.output_file_name = ""
         props.video_codec = ""
         props.generated_command = ""
-        # Não limpa os frames ou o formato, pois geralmente são valores que o usuário pode querer manter.
-        # Se quiser limpar tudo, podemos adicionar mais campos aqui.
-        self.report({'INFO'}, "Campos de texto limpos.")
+        props.scenes.clear()
+        props.cameras.clear()
+        props.use_scene_system = False
+        props.use_camera_system = False
+        props.use_custom_render_engine = False
+        self.report({'INFO'}, "Campos de texto e listas limpos.")
         return {'FINISHED'}
 
 # --- Operador para Doar (Mensagem Informativa) ---
@@ -261,23 +378,124 @@ class DonateBlenderAddon(bpy.types.Operator):
         self.report({'INFO'}, "Este addon é de graça e não tem que pagar! Obrigado pelo seu interesse.")
         return {'FINISHED'}
 
+# --- Operador para Atualizar o Addon ---
+class UpdateBlenderAddon(bpy.types.Operator):
+    bl_idname = "render.update_blender_addon"
+    bl_label = "Atualizar Addon"
+    bl_description = "Selecione o arquivo .py do addon atualizado para instalar"
+
+    filepath: bpy.props.StringProperty(
+        subtype='FILE_PATH',
+        name="Arquivo de Atualização (.py)",
+        description="Selecione o novo arquivo .py do addon para atualizar"
+    )
+
+    def execute(self, context):
+        if not self.filepath:
+            self.report({'ERROR'}, "Nenhum arquivo de atualização selecionado.")
+            return {'CANCELLED'}
+
+        current_addon_path = os.path.dirname(os.path.abspath(__file__))
+        current_addon_file = os.path.join(current_addon_path, os.path.basename(__file__))
+        
+        if not self.filepath.lower().endswith(".py"):
+            self.report({'ERROR'}, "O arquivo selecionado não é um arquivo Python (.py).")
+            return {'CANCELLED'}
+
+        try:
+            shutil.copyfile(self.filepath, current_addon_file)
+            self.report({'INFO'}, "Arquivo do addon atualizado com sucesso!")
+            self.report({'INFO'}, "Para que as mudanças entrem em vigor, por favor, DESATIVE e REATIVE este addon (ou reinicie o Blender).")
+        except Exception as e:
+            self.report({'ERROR'}, f"Erro ao atualizar o addon: {e}. Verifique as permissões do arquivo.")
+            return {'CANCELLED'}
+
+        return {'FINISHED'}
+    
+    def invoke(self, context, event):
+        context.window_manager.fileselect_add(self)
+        return {'RUNNING_MODAL'}
+
+# --- NOVO: Operador para Iniciar Render e Fechar Blender ---
+class StartBlenderRenderAndQuit(bpy.types.Operator):
+    bl_idname = "render.start_and_quit"
+    bl_label = "Iniciar Render e Sair do Blender"
+    bl_description = "Fecha o Blender e inicia o(s) comando(s) de renderização no terminal."
+
+    @classmethod
+    def poll(cls, context):
+        # O botão só estará ativo se houver um comando gerado
+        return bool(context.scene.blender_render_props.generated_command)
+
+    def invoke(self, context, event):
+        # Exibe um diálogo de confirmação ao usuário
+        return context.window_manager.invoke_confirm(self, event)
+
+    def execute(self, context):
+        props = context.scene.blender_render_props
+        
+        if not props.generated_command:
+            self.report({'ERROR'}, "Nenhum comando de renderização gerado. Por favor, gere o comando primeiro.")
+            return {'CANCELLED'}
+
+        # Divide os comandos em linhas individuais
+        commands = props.generated_command.split("\n\n")
+
+        # Determina o SO e a forma de encadear e executar os comandos
+        if sys.platform.startswith('win'):
+            # Windows: usa '&&' para encadear comandos no CMD
+            # 'start cmd /k' abre uma nova janela do CMD e a mantém aberta após o comando
+            chained_command = " && ".join(commands)
+            # Adiciona um pause no final para o usuário ver a saída antes da janela fechar
+            full_cmd = f'start cmd /k "{chained_command} & echo. & pause"'
+            shell_exec = True # Precisa de shell=True para usar 'start'
+        elif sys.platform.startswith('linux') or sys.platform.startswith('darwin'):
+            # Linux/macOS: usa ';' para encadear comandos em bash
+            chained_command = "; ".join(commands)
+            if sys.platform.startswith('linux'):
+                # Tenta abrir o gnome-terminal. Pode precisar de ajuste para outras distros/DEs
+                full_cmd = f"gnome-terminal -- /bin/bash -c '{chained_command}; echo \"\\nRenderização concluída. Pressione Enter para fechar.\"; read -p \"\"'"
+            else: # macOS
+                # Usa osascript para abrir o Terminal.app
+                full_cmd = f"osascript -e 'tell application \"Terminal\" to do script \"{chained_command}; echo \\\"\\nRenderização concluída. Pressione Enter para fechar.\\\"; read -p \\\"\\\"\"\"\"' & tell application \"Terminal\" to activate"
+            shell_exec = True # Precisa de shell=True para osascript ou gnome-terminal serem encontrados no PATH
+        else:
+            self.report({'ERROR'}, "Sistema operacional não suportado para execução automática no terminal.")
+            return {'CANCELLED'}
+
+        try:
+            # Importante: Aviso ao usuário sobre salvar o trabalho
+            self.report({'INFO'}, "ATENÇÃO: Fechando o Blender e iniciando a renderização. Salve seu trabalho se necessário!")
+            
+            # Inicia o comando em um novo processo (não bloqueia o Blender)
+            subprocess.Popen(full_cmd, shell=shell_exec)
+            
+            # Fecha o Blender (irá perguntar para salvar se houver mudanças não salvas)
+            bpy.ops.wm.quit_blender()
+
+        except Exception as e:
+            self.report({'ERROR'}, f"Falha ao iniciar o render: {e}")
+            return {'CANCELLED'}
+
+        return {'FINISHED'}
+
+
 # --- Grupo de Propriedades Principal para o Addon ---
-# Esta classe armazena todas as configurações do addon
 class BlenderRenderProperties(bpy.types.PropertyGroup):
     blender_executable_path: bpy.props.StringProperty(
         name="Caminho do Executável do Blender",
         description="Caminho completo para o executável do Blender (ex: C:\\Program Files\\Blender Foundation\\Blender\\blender.exe). Será preenchido automaticamente se vazio.",
-        subtype='FILE_PATH' # Isso adiciona um botão de navegador de arquivos
+        subtype='FILE_PATH'
     )
     blend_file_path: bpy.props.StringProperty(
         name="Caminho do Arquivo .blend",
         description="Caminho completo para o arquivo .blend a ser renderizado. Será preenchido automaticamente com o arquivo atual se vazio.",
-        subtype='FILE_PATH' # Isso adiciona um botão de navegador de arquivos
+        subtype='FILE_PATH'
     )
     custom_output_path: bpy.props.StringProperty(
         name="Caminho da Pasta de Saída (Opcional)",
         description="Caminho completo para a pasta onde os renders serão salvos (deixe em branco para salvar na pasta do .blend).",
-        subtype='DIR_PATH' # Isso adiciona um botão de navegador de diretórios
+        subtype='DIR_PATH'
     )
     output_format: bpy.props.EnumProperty(
         name="Formato de Saída",
@@ -306,8 +524,13 @@ class BlenderRenderProperties(bpy.types.PropertyGroup):
         name="Usar Sistema de Cenas",
         description="Ativar para renderizar múltiplas cenas com ranges de frames específicos",
         default=False,
-        # O 'update' força a interface a redesenhar, mostrando/ocultando campos
         update=lambda self, context: context.area.tag_redraw() 
+    )
+    use_camera_system: bpy.props.BoolProperty(
+        name="Usar Sistema de Múltiplas Câmeras",
+        description="Ativar para renderizar múltiplas câmeras com ranges de frames específicos",
+        default=False,
+        update=lambda self, context: context.area.tag_redraw()
     )
     output_file_name: bpy.props.StringProperty(
         name="Nome do Arquivo de Saída (para vídeo)",
@@ -336,15 +559,19 @@ class BlenderRenderProperties(bpy.types.PropertyGroup):
         description="Frames por segundo para a saída de vídeo. Deixe em branco para o padrão do Blender.",
         min=1
     )
-    # Coleção de propriedades para armazenar as configurações de cada cena
     scenes: bpy.props.CollectionProperty(type=BlenderSceneProperties)
+    cameras: bpy.props.CollectionProperty(type=BlenderCameraProperties)
+    active_camera_index: bpy.props.IntProperty(
+        name="Índice da Câmera Ativa",
+        default=0,
+        min=0
+    )
     generated_command: bpy.props.StringProperty(
         name="Comando(s) Gerado(s)",
         description="O(s) comando(s) de linha gerado(s) para renderização",
         default="",
-        subtype='NONE' # Exibe como texto simples, não como caminho de arquivo
+        subtype='NONE'
     )
-    # Nova propriedade para escolher o motor de renderização
     use_custom_render_engine: bpy.props.BoolProperty(
         name="Usar Motor de Render Personalizado",
         description="Ativar para especificar o motor de renderização (Cycles, Eevee, Workbench)",
@@ -364,57 +591,72 @@ class BlenderRenderProperties(bpy.types.PropertyGroup):
 
 
 # --- Painel da Interface do Usuário (UI) ---
-# Esta classe define como o addon aparecerá na interface do Blender
 class BlenderRenderPanel(bpy.types.Panel):
-    bl_label = "Render4Me ! Brasil !" # Título do painel atualizado
-    bl_idname = "VIEW3D_PT_blender_render_cli_generator" # ID único para o painel
-    bl_space_type = 'VIEW_3D' # Onde o painel será exibido (na Viewport 3D)
-    bl_region_type = 'UI' # Na região da UI (Sidebar ou N-Panel)
-    bl_category = "CLI Render" # Nome da aba na Sidebar
+    bl_label = "Render4Me ! Brasil !"
+    bl_idname = "VIEW3D_PT_blender_render_cli_generator"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "CLI Render"
 
     def draw(self, context):
-        layout = self.layout # O layout é a área onde você adiciona os elementos da UI
-        props = context.scene.blender_render_props # Acessa as propriedades do addon
+        layout = self.layout
+        props = context.scene.blender_render_props
 
-        # Seção de Configurações Gerais
         box = layout.box()
         box.label(text="Configurações Gerais")
-        box.prop(props, "blender_executable_path") # Campo com botão de busca de arquivo
-        box.prop(props, "blend_file_path") # Campo com botão de busca de arquivo
-        box.prop(props, "custom_output_path") # Campo com botão de busca de diretório
+        box.prop(props, "blender_executable_path")
+        box.prop(props, "blend_file_path")
+        box.prop(props, "custom_output_path")
         box.prop(props, "output_format")
 
-        # Opção para usar motor de render personalizado
         row = layout.row()
         row.prop(props, "use_custom_render_engine")
         if props.use_custom_render_engine:
             row = layout.row()
             row.prop(props, "render_engine")
 
-        # Verifica o tipo de saída (imagem ou vídeo) para alternar campos
         selected_output_type = ('image' if props.output_format in ["PNG", "JPEG", "EXR", "TIFF", "BMP"] else 'video')
 
-        # Opção para usar o sistema de cenas
         row = layout.row()
         row.prop(props, "use_scene_system")
+        row = layout.row()
+        row.prop(props, "use_camera_system")
 
-        if props.use_scene_system:
-            # Seção do Sistema de Cenas
+        if props.use_camera_system:
+            box = layout.box()
+            box.label(text="Câmeras para Renderizar")
+
+            row = box.row(align=True)
+            col = row.column()
+            col.template_list("BLENDER_RENDER_UL_cameras", "", props, "cameras", props, "active_camera_index", rows=5)
+
+            col = row.column(align=True)
+            col.operator("camera.add_blender_camera", icon='ADD', text="")
+            col.operator("camera.remove_blender_camera", icon='REMOVE', text="")
+            
+            col.separator()
+            col.operator("render.cameras_move", icon='TRIA_UP', text="").direction = 'UP'
+            col.operator("render.cameras_move", icon='TRIA_DOWN', text="").direction = 'DOWN'
+
+            if selected_output_type == 'video':
+                box = layout.box()
+                box.label(text="Configurações de Vídeo (Aplicam-se a todas as câmeras)")
+                box.prop(props, "output_file_name")
+                box.prop(props, "video_codec")
+                box.prop(props, "fps")
+
+        elif props.use_scene_system:
             box = layout.box()
             box.label(text="Cenas para Renderizar")
-            # Itera sobre as cenas adicionadas e desenha seus campos
             for i, scene_prop in enumerate(props.scenes):
                 scene_box = box.box()
                 row = scene_box.row(align=True)
                 row.prop(scene_prop, "name")
-                # Botão para remover a cena
                 row.operator("scene.remove_blender_scene", text="", icon='X').index = i
                 scene_box.prop(scene_prop, "start_frame")
                 scene_box.prop(scene_prop, "end_frame")
-            # Botão para adicionar nova cena
             box.operator("scene.add_blender_scene", text="Adicionar Cena", icon='ADD')
 
-            # Configurações de vídeo globais se o sistema de cenas estiver ativo e for vídeo
             if selected_output_type == 'video':
                 box = layout.box()
                 box.label(text="Configurações de Vídeo (Aplicam-se a todas as cenas)")
@@ -422,13 +664,12 @@ class BlenderRenderPanel(bpy.types.Panel):
                 box.prop(props, "video_codec")
                 box.prop(props, "fps")
 
-        else: # Não usando o sistema de cenas (render global)
+        else:
             if selected_output_type == 'image':
-                # Campos para render de imagem única
                 box = layout.box()
                 box.label(text="Configurações de Render de Imagem")
                 box.prop(props, "frame_number")
-            else: # Campos para render de vídeo global
+            else:
                 box = layout.box()
                 box.label(text="Configurações de Render de Vídeo (Global)")
                 box.prop(props, "output_file_name")
@@ -437,28 +678,40 @@ class BlenderRenderPanel(bpy.types.Panel):
                 box.prop(props, "video_codec")
                 box.prop(props, "fps")
 
-        # Botões para Gerar e Copiar o Comando
         row = layout.row(align=True)
-        row.operator("render.generate_blender_command") # Botão "Gerar Comando de Render"
-        row.operator("render.clear_blender_fields", icon='TRASH') # Botão "Limpar Campos" com ícone de lixeira
+        row.operator("render.generate_blender_command")
+        row.operator("render.clear_blender_fields", icon='TRASH')
         
-        # Exibe o comando gerado em um campo de texto não editável
         layout.prop(props, "generated_command", text="Comando(s) Gerado(s)")
-        layout.operator("render.copy_blender_command") # Botão "Copiar Comando"
+        layout.operator("render.copy_blender_command")
 
-        # Botão de Doação
-        layout.separator() # Adiciona um separador visual
-        layout.operator("render.donate_blender_addon", icon='FUND') # Botão "Doar" com ícone de "FUND"
+        # --- Botão NOVO: Iniciar Render e Sair do Blender ---
+        layout.separator() # Separador para clareza visual
+        row = layout.row()
+        row.operator("render.start_and_quit", icon='PLAY') # Botão com ícone de Play
+        # --- Fim do Botão NOVO ---
+
+        box = layout.box()
+        box.label(text="Manutenção do Addon")
+        box.operator("render.update_blender_addon", icon='FILE_FOLDER')
+        layout.operator("render.donate_blender_addon", icon='FUND')
 
 # Lista de classes a serem registradas/desregistradas no Blender
 classes = (
     BlenderSceneProperties,
+    BlenderCameraProperties,
     AddBlenderScene,
     RemoveBlenderScene,
+    AddBlenderCamera,
+    RemoveBlenderCamera,
+    BLENDER_RENDER_OT_cameras_move,
+    BLENDER_RENDER_UL_cameras,
     GenerateBlenderCommand,
     CopyBlenderCommand,
     ClearBlenderFields,
-    DonateBlenderAddon, # Adiciona a nova classe de operador
+    DonateBlenderAddon,
+    UpdateBlenderAddon,
+    StartBlenderRenderAndQuit, # Adiciona o novo operador aqui!
     BlenderRenderProperties,
     BlenderRenderPanel,
 )
@@ -467,15 +720,12 @@ classes = (
 def register():
     for cls in classes:
         bpy.utils.register_class(cls)
-    # Cria um "pointer" para as propriedades do addon na cena atual do Blender
     bpy.types.Scene.blender_render_props = bpy.props.PointerProperty(type=BlenderRenderProperties)
 
 def unregister():
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
-    # Remove o "pointer" das propriedades ao desativar o addon
     del bpy.types.Scene.blender_render_props
 
-# Isso permite que o script seja executado diretamente no Blender para testes
 if __name__ == "__main__":
     register()
